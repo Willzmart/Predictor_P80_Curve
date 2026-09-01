@@ -117,6 +117,9 @@ def entrenar_curva_hibrido(modelo_key, X_train, X_test, y_train, y_test,
     cfg = REGISTRY[modelo_key]
     epoch = max(int(epoch or cfg["epoch"]), 2)
     pop_size = max(int(pop_size or cfg["pop_size"]), 10)
+    # BaseGA de mealpy falla con población impar -> forzar par (ver models.py)
+    if pop_size % 2:
+        pop_size += 1
     percentiles = list(y_train.columns)
 
     cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)

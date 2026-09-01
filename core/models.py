@@ -205,6 +205,10 @@ def entrenar_hibrido(
     pop_size = pop_size or cfg["pop_size"]
     # Piso de seguridad: mealpy (sobre todo GA) falla con poblaciones diminutas.
     pop_size = max(int(pop_size), 10)
+    # BaseGA de mealpy tiene un bug con población IMPAR (el cruce genera hijos de
+    # a pares y el conteo no cuadra -> IndexError). Forzamos población par.
+    if pop_size % 2:
+        pop_size += 1
     epoch = max(int(epoch), 2)
     needs_scaling = cfg["needs_scaling"]
 
