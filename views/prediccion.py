@@ -198,14 +198,54 @@ def _prediccion_lote_curva(bundle, percentiles):
 # =========================================================================== #
 #  Utilidades                                                                 #
 # =========================================================================== #
+def _es_binaria(serie):
+    """True si la columna solo toma valores 0/1 (dummy: litología, material)."""
+    vals = set(pd.unique(serie.dropna()))
+    return vals.issubset({0, 1, 0.0, 1.0})
+
+
+def _defaults_desde_datos(features):
+    """Valores por defecto realistas por variable. Para columnas continuas usa
+    la mediana; para dummies 0/1 usa la moda (0 o 1), nunca 0.5."""
+    df = db.cargar_datos()
+    defaults, binarias = {}, {}
+    for f in features:
+        if not df.empty and f in df.columns:
+            col = df[f]
+            binarias[f] = _es_binaria(col)
+            try:
+                if binarias[f]:
+                    # moda: la categoría más frecuente (0 o 1)
+                    defaults[f] = int(col.mode().iloc[0])
+                else:
+                    defaults[f] = float(col.median())
+            except Exception:
+                defaults[f] = 0.0
+        else:
+            defaults[f] = 0.0
+            binarias[f] = False
+    return defaults, binarias
+
+
 def _formulario_features(features, prefijo):
     st.write("Parámetros de voladura:")
+    st.caption("Los campos vienen con un valor de referencia de tu base "
+               "(mediana en las variables continuas; 0/1 en litología y material). "
+               "Cambia solo lo que te interese; poner todo en 0 da una predicción sin sentido.")
+    defaults, binarias = _defaults_desde_datos(features)
     vals = {}
     grid = st.columns(3)
     for i, feat in enumerate(features):
         with grid[i % 3]:
-            vals[feat] = st.number_input(feat, value=0.0, format="%.4f",
-                                         key=f"in_{prefijo}_{feat}")
+            if binarias.get(feat):
+                # Litología / Material: selector 0 o 1 (no número libre)
+                opciones = [0, 1]
+                idx = opciones.index(int(defaults[feat])) if int(defaults[feat]) in opciones else 0
+                vals[feat] = st.selectbox(f"{feat} (0/1)", opciones, index=idx,
+                                          key=f"in_{prefijo}_{feat}")
+            else:
+                vals[feat] = st.number_input(feat, value=round(float(defaults[feat]), 4),
+                                             format="%.4f", key=f"in_{prefijo}_{feat}")
     return vals
 
 
