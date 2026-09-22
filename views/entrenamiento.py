@@ -1,4 +1,7 @@
 """views/entrenamiento.py — Entrenamiento de modelos: P80 o Curva granulométrica."""
+import re
+import unicodedata
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -6,6 +9,41 @@ import streamlit as st
 
 from core import (db, models as M, curve_models as CM, training,
                   versioning as V, preprocessing as P)
+
+
+# --------------------------------------------------------------------------- #
+#  Utilidades para trabajar con datasets de nombres variables                 #
+# --------------------------------------------------------------------------- #
+def _norm(s) -> str:
+    """Normaliza un nombre de columna: sin acentos, minúsculas, sin espacios.
+    'P80 (in)' -> 'p80(in)' ; 'Pmáx (in)' -> 'pmax(in)'."""
+    s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode()
+    return s.strip().lower().replace(" ", "")
+
+
+def _detectar_target_p80(cols):
+    """Devuelve la columna que representa el P80, aunque tenga sufijos
+    ('P80', 'P80 (in)', 'p80', 'P80.'). None si no se encuentra ninguna."""
+    if P.TARGET_P80 in cols:                 # coincidencia exacta ("P80")
+        return P.TARGET_P80
+    for c in cols:
+        if _norm(c).startswith("p80"):       # "P80 (in)", "p80", ...
+            return c
+    return None
+
+
+def _es_salida_fragmentacion(col) -> bool:
+    """True si la columna es una SALIDA de la voladura (otro percentil, Pmáx o
+    % de finos) y por tanto no debe usarse como predictor del P80: usarla sería
+    fuga de información. Reconoce nombres con sufijos como '(in)' o '(%)'."""
+    n = _norm(col)
+    if "finos" in n:                         # "Porcentaje de finos <1 (%)"
+        return True
+    if n.startswith("pmax"):                 # "Pmáx (in)" -> "pmax(in)"
+        return True
+    if re.match(r"^p\d{1,3}(\D|$)", n):       # p10, p50, p80, p100, "p80(in)"...
+        return True
+    return False
 
 
 def page_entrenamiento():
@@ -53,19 +91,32 @@ def _entrenar_p80(df, hay_curva):
 
     st.subheader("2 · Configuración")
     cols_all = df.columns.tolist()
-    target = P.TARGET_P80 if P.TARGET_P80 in cols_all else cols_all[-1]
+
+    # La variable objetivo la ELIGE el usuario (con autodetección de P80). Antes
+    # se caía a la última columna cuando no existía una llamada exactamente
+    # "P80", lo que hacía que el modelo predijera una columna equivocada.
+    sugerido = _detectar_target_p80(cols_all)
     c1, c2 = st.columns(2)
-    c1.metric("Variable objetivo", target)
+    target = c1.selectbox(
+        "Variable objetivo (P80)", cols_all,
+        index=cols_all.index(sugerido) if sugerido else len(cols_all) - 1,
+        key="target_p80",
+        help="Columna que contiene el P80. Se autoselecciona si se detecta "
+             "(admite 'P80', 'P80 (in)', 'p80', ...).")
+    if sugerido is None:
+        c1.warning("No se detectó una columna 'P80'. Selecciónala manualmente "
+                   "antes de entrenar.")
     test_size = c2.slider("Proporción de test", 0.1, 0.4, 0.2, 0.05, key="ts_p80")
 
-    # Excluir por defecto: % Finos y los demás percentiles (evitar fuga)
-    otros_percentiles = [p for p in P.PERCENTILES if p in df.columns and p != target]
+    # Excluir por defecto las SALIDAS de fragmentación (otros percentiles, Pmáx,
+    # % de finos) para evitar fuga de información. Reconoce sufijos como "(in)".
     posibles = [c for c in cols_all if c != target]
-    excl_def = [c for c in posibles if c == P.TARGET_FINOS] + otros_percentiles
-    excluir = st.multiselect("Excluir de las variables predictoras", posibles,
-                             default=excl_def, key="excl_p80",
-                             help="Se excluyen % Finos y los otros percentiles para "
-                                  "evitar fuga de información.")
+    excl_def = [c for c in posibles if _es_salida_fragmentacion(c)]
+    excluir = st.multiselect(
+        "Excluir de las variables predictoras", posibles,
+        default=excl_def, key="excl_p80",
+        help="Se excluyen otros percentiles, Pmáx y % de finos (son resultados de "
+             "la voladura, no parámetros de diseño) para evitar fuga de información.")
     features = [c for c in posibles if c not in excluir]
 
     c3, c4, c5 = st.columns(3)
