@@ -1,37 +1,70 @@
-"""views/prediccion.py — Predicción de P80 o de la Curva granulométrica."""
+"""views/prediccion.py — Predicción de P80 o de la Curva granulométrica.
+ 
+El P80 predicho se muestra como  valor ± error, donde el error es el RMSE en
+test del modelo entrenado (guardado en el bundle como metrics["rmse_test"]).
+En la curva, el error de cada percentil es su propio RMSE en test.
+"""
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
-
+ 
 from core import (db, models as M, curve_models as CM,
                   versioning as V, preprocessing as P)
-
-
+ 
+ 
 def page_prediccion():
     st.title("🎯 Predicción")
-
+ 
     hay_p80 = V.version_activa("p80") is not None
     hay_curva = V.version_activa("curva") is not None
-
+ 
     if not hay_p80 and not hay_curva:
         st.warning("No hay modelos entrenados. Entrena y guarda una versión en "
                    "**Entrenamiento**.")
         return
-
+ 
     disponibles = []
     if hay_p80:
         disponibles.append("Predicción de P80")
     if hay_curva:
         disponibles.append("Curva granulométrica (P10–P100)")
     tarea = st.radio("¿Qué deseas predecir?", disponibles, horizontal=True)
-
+ 
     if tarea.startswith("Predicción"):
         _predecir_p80()
     else:
         _predecir_curva()
-
-
+ 
+ 
+# =========================================================================== #
+#  Error del modelo (RMSE)                                                    #
+# =========================================================================== #
+def _rmse_modelo(bundle):
+    """RMSE en test del modelo entrenado (error ±). None si no está guardado."""
+    try:
+        return float(bundle["metrics"]["rmse_test"])
+    except (KeyError, TypeError, ValueError):
+        return None
+ 
+ 
+def _rmse_por_percentil(bundle):
+    """Dict {percentil: RMSE test} para los modelos de curva."""
+    out = {}
+    for d in bundle.get("por_percentil", []):
+        try:
+            out[d["percentil"]] = float(d["rmse_test"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    return out
+ 
+ 
+def _rango(valor, err):
+    """Intervalo [valor - err, valor + err]; el límite inferior no baja de 0
+    (un tamaño de partícula no puede ser negativo)."""
+    return max(valor - err, 0.0), valor + err
+ 
+ 
 # =========================================================================== #
 #  P80                                                                        #
 # =========================================================================== #
@@ -39,7 +72,7 @@ def _predecir_p80():
     va = V.version_activa("p80")
     meta = V.cargar_metadata(va, "p80")
     st.caption(f"Versión activa (P80): **{va}** · {meta['fecha']}")
-
+ 
     keys = meta["modelos"]
     labels = [meta["labels"][k] for k in keys]
     sel = st.selectbox("Modelo", labels, index=keys.index(meta["mejor_modelo"]),
@@ -47,19 +80,33 @@ def _predecir_p80():
     modelo_key = keys[labels.index(sel)]
     bundle = V.cargar_bundle(va, modelo_key, "p80")
     target = bundle["target"]
-
+    rmse = _rmse_modelo(bundle)
+    unidad = db.meta_get("unidad_p80", "cm")
+ 
+    if rmse is not None:
+        st.caption(f"Error del modelo (RMSE en test): **± {rmse:.2f} {unidad}**")
+ 
     modo = st.radio("Modo", ["Ingreso manual", "Archivo por lotes"],
                     horizontal=True, key="modo_p80")
-
+ 
     if modo == "Ingreso manual":
         vals = _formulario_features(bundle["features"], "p80")
         if st.button("🔮 Predecir P80", type="primary"):
             pred = float(M.predecir(bundle, pd.DataFrame([vals]))[0])
-            _tarjeta_resultado(f"{target} estimado", f"{pred:.2f}")
+            if rmse is not None:
+                lo, hi = _rango(pred, rmse)
+                _tarjeta_resultado(
+                    f"{target} estimado",
+                    f"{pred:.2f} ± {rmse:.2f} {unidad}",
+                    f"Rango esperado: {lo:.2f} – {hi:.2f} {unidad} "
+                    f"(± 1 RMSE en test del modelo)")
+            else:
+                _tarjeta_resultado(f"{target} estimado", f"{pred:.2f} {unidad}",
+                                   "Error no disponible (reentrena el modelo)")
             db.log_prediccion(va, modelo_key, vals, pred)
     else:
-        _prediccion_lote_p80(bundle, va, modelo_key, target)
-
+        _prediccion_lote_p80(bundle, target, rmse)
+ 
     st.divider()
     with st.expander("🕘 Historial de predicciones"):
         hist = db.historial_predicciones(tipo="p80")
@@ -68,9 +115,9 @@ def _predecir_p80():
         else:
             st.dataframe(hist[["fecha", "version", "modelo", "p80_predicho"]],
                          width="stretch", hide_index=True)
-
-
-def _prediccion_lote_p80(bundle, va, modelo_key, target):
+ 
+ 
+def _prediccion_lote_p80(bundle, target, rmse):
     arch = st.file_uploader("CSV / Excel", type=["xlsx", "xls", "csv"], key="f_p80")
     aplicar = st.checkbox("Aplicar pipeline de tesis", value=True, key="ap_p80")
     if arch is not None:
@@ -83,7 +130,12 @@ def _prediccion_lote_p80(bundle, va, modelo_key, target):
                 st.error("Faltan columnas: " + ", ".join(faltan))
             else:
                 out = dfn.copy()
-                out[f"{target}_predicho"] = M.predecir(bundle, dfn)
+                pred = np.asarray(M.predecir(bundle, dfn), dtype=float)
+                out[f"{target}_predicho"] = np.round(pred, 3)
+                if rmse is not None:
+                    out[f"{target}_error (±RMSE)"] = round(rmse, 3)
+                    out[f"{target}_min"] = np.round(np.maximum(pred - rmse, 0.0), 3)
+                    out[f"{target}_max"] = np.round(pred + rmse, 3)
                 st.success(f"{len(out)} predicciones generadas.")
                 st.dataframe(out.head(30), width="stretch")
                 st.download_button("⬇️ Descargar (CSV)",
@@ -91,8 +143,8 @@ def _prediccion_lote_p80(bundle, va, modelo_key, target):
                                    "predicciones_p80.csv", "text/csv")
         except Exception as e:
             st.error(f"Error: {e}")
-
-
+ 
+ 
 # =========================================================================== #
 #  Curva granulométrica                                                       #
 # =========================================================================== #
@@ -100,7 +152,7 @@ def _predecir_curva():
     va = V.version_activa("curva")
     meta = V.cargar_metadata(va, "curva")
     st.caption(f"Versión activa (Curva): **{va}** · {meta['fecha']}")
-
+ 
     keys = meta["modelos"]
     labels = [meta["labels"][k] for k in keys]
     sel = st.selectbox("Modelo", labels, index=keys.index(meta["mejor_modelo"]),
@@ -109,10 +161,12 @@ def _predecir_curva():
     bundle = V.cargar_bundle(va, modelo_key, "curva")
     percentiles = bundle["percentiles"]
     pct = [int(p[1:]) for p in percentiles]
-
+    rmse_p = _rmse_por_percentil(bundle)
+    unidad = db.meta_get("unidad_p80", "cm")
+ 
     modo = st.radio("Modo", ["Ingreso manual", "Archivo por lotes"],
                     horizontal=True, key="modo_cur")
-
+ 
     if modo == "Ingreso manual":
         vals = _formulario_features(bundle["features"], "cur")
         if st.button("🔮 Predecir curva", type="primary"):
@@ -121,11 +175,20 @@ def _predecir_curva():
                 if "P80" in percentiles else None
             db.log_prediccion(va, modelo_key, vals, p80_curva,
                               tipo="curva", curva=[round(float(x), 4) for x in curva])
+ 
+            errs = np.array([rmse_p.get(p, np.nan) for p in percentiles])
+            hay_err = not np.all(np.isnan(errs))
+ 
             c1, c2 = st.columns([3, 2])
             with c1:
                 fig, ax = plt.subplots(figsize=(6, 4))
+                if hay_err:
+                    lo = np.maximum(curva - np.nan_to_num(errs), 0.0)
+                    hi = curva + np.nan_to_num(errs)
+                    ax.fill_betweenx(pct, lo, hi, color="#d1701c", alpha=0.2,
+                                     label="± RMSE (test)")
                 ax.plot(curva, pct, "s--", color="#d1701c", label="Predicho")
-                ax.set_xlabel("Tamaño de partícula (cm)")
+                ax.set_xlabel(f"Tamaño de partícula ({unidad})")
                 ax.set_ylabel("% pasante acumulado")
                 ax.set_title("Curva granulométrica predicha")
                 ax.grid(True, ls="--", alpha=0.4)
@@ -133,18 +196,22 @@ def _predecir_curva():
                 st.pyplot(fig)
             with c2:
                 tab = pd.DataFrame({"Percentil": percentiles,
-                                    "Tamaño (cm)": np.round(curva, 3)})
+                                    f"Tamaño ({unidad})": np.round(curva, 3)})
+                if hay_err:
+                    tab["± Error (RMSE)"] = np.round(errs, 3)
                 st.dataframe(tab, width="stretch", hide_index=True)
-                # P80 leído de la curva
-                if "P80" in percentiles:
-                    st.metric("P80 (de la curva)",
-                              f"{curva[percentiles.index('P80')]:.2f}")
+                # P80 leído de la curva, con su propio error
+                if p80_curva is not None:
+                    e80 = rmse_p.get("P80")
+                    texto = f"{p80_curva:.2f} ± {e80:.2f}" if e80 is not None \
+                        else f"{p80_curva:.2f}"
+                    st.metric(f"P80 de la curva ({unidad})", texto)
                 st.download_button("⬇️ Descargar curva (CSV)",
                                    tab.to_csv(index=False).encode("utf-8"),
                                    "curva_predicha.csv", "text/csv")
     else:
-        _prediccion_lote_curva(bundle, percentiles)
-
+        _prediccion_lote_curva(bundle, percentiles, rmse_p)
+ 
     st.divider()
     with st.expander("🕘 Historial de predicciones de curva"):
         hist = db.historial_predicciones(tipo="curva")
@@ -168,9 +235,9 @@ def _predecir_curva():
             st.download_button("⬇️ Descargar historial de curvas (CSV)",
                                det.to_csv(index=False).encode("utf-8"),
                                "historial_curvas.csv", "text/csv")
-
-
-def _prediccion_lote_curva(bundle, percentiles):
+ 
+ 
+def _prediccion_lote_curva(bundle, percentiles, rmse_p):
     arch = st.file_uploader("CSV / Excel", type=["xlsx", "xls", "csv"], key="f_cur")
     aplicar = st.checkbox("Aplicar pipeline de tesis", value=True, key="ap_cur")
     if arch is not None:
@@ -186,6 +253,8 @@ def _prediccion_lote_curva(bundle, percentiles):
                 out = dfn.copy()
                 for j, p in enumerate(percentiles):
                     out[f"{p}_pred"] = np.round(curvas[:, j], 3)
+                    if p in rmse_p:
+                        out[f"{p}_error (±RMSE)"] = round(rmse_p[p], 3)
                 st.success(f"{len(out)} curvas generadas.")
                 st.dataframe(out.head(30), width="stretch")
                 st.download_button("⬇️ Descargar (CSV)",
@@ -193,8 +262,8 @@ def _prediccion_lote_curva(bundle, percentiles):
                                    "curvas_predichas.csv", "text/csv")
         except Exception as e:
             st.error(f"Error: {e}")
-
-
+ 
+ 
 # =========================================================================== #
 #  Utilidades                                                                 #
 # =========================================================================== #
@@ -202,8 +271,8 @@ def _es_binaria(serie):
     """True si la columna solo toma valores 0/1 (dummy: litología, material)."""
     vals = set(pd.unique(serie.dropna()))
     return vals.issubset({0, 1, 0.0, 1.0})
-
-
+ 
+ 
 def _defaults_desde_datos(features):
     """Valores por defecto realistas por variable. Para columnas continuas usa
     la mediana; para dummies 0/1 usa la moda (0 o 1), nunca 0.5."""
@@ -225,8 +294,8 @@ def _defaults_desde_datos(features):
             defaults[f] = 0.0
             binarias[f] = False
     return defaults, binarias
-
-
+ 
+ 
 def _formulario_features(features, prefijo):
     st.write("Parámetros de voladura:")
     st.caption("Los campos vienen con un valor de referencia de tu base "
@@ -247,11 +316,14 @@ def _formulario_features(features, prefijo):
                 vals[feat] = st.number_input(feat, value=round(float(defaults[feat]), 4),
                                              format="%.4f", key=f"in_{prefijo}_{feat}")
     return vals
-
-
-def _tarjeta_resultado(titulo, valor):
+ 
+ 
+def _tarjeta_resultado(titulo, valor, subtitulo=None):
+    sub = (f"<div style='font-size:0.95rem;color:#666;margin-top:0.4rem'>"
+           f"{subtitulo}</div>") if subtitulo else ""
     st.markdown(
         f"<div style='text-align:center;padding:1.4rem;border:2px solid #4c78a8;"
         f"border-radius:12px'><div style='font-size:1rem;color:#666'>{titulo}"
         f"</div><div style='font-size:2.6rem;font-weight:700;color:#1f4e79'>"
-        f"{valor}</div></div>", unsafe_allow_html=True)
+        f"{valor}</div>{sub}</div>", unsafe_allow_html=True)
+ 
