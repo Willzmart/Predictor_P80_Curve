@@ -43,6 +43,10 @@ def _es_salida_fragmentacion(col) -> bool:
         return True
     if re.match(r"^p\d{1,3}(\D|$)", n):       # p10, p50, p80, p100, "p80(in)"...
         return True
+    if re.match(r"^x\d{1,3}(\D|$)", n):       # x50_ref, x80... (tamaños de la curva)
+        return True
+    if "uniformidad" in n or n.startswith("topsize"):  # índice n de Rosin-Rammler, Top Size
+        return True
     return False
  
  
