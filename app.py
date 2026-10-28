@@ -39,6 +39,7 @@ from views.datos import page_datos
 from views.entrenamiento import page_entrenamiento
 from views.prediccion import page_prediccion
 from views.resultados import page_resultados
+from views.optimizacion import page_optimizacion
 from views.configuracion import page_configuracion
  
  
@@ -81,6 +82,7 @@ def page_inicio():
         "- 🧠 **Entrenamiento** — seleccionar modelos, entrenar, comparar y versionar.\n"
         "- 🎯 **Predicción** — estimar el P80 o la **curva granulométrica** de nuevas voladuras.\n"
         "- 📈 **Resultados** — ranking, predicho-vs-real, residuos, importancias, historiales.\n"
+        "- 🧩 **Optimización** — ingresa el P80 requerido y obtén burden, taco, longitud de taladro y FP.\n"
         "- ⚙️ **Configuración** — gestión de versiones y ayuda.")
  
     if not db.tiene_datos():
@@ -97,6 +99,7 @@ nav = st.navigation({
         st.Page(page_entrenamiento, title="Entrenamiento", icon="🧠", url_path="entrenamiento"),
         st.Page(page_prediccion, title="Predicción", icon="🎯", url_path="prediccion"),
         st.Page(page_resultados, title="Resultados", icon="📈", url_path="resultados"),
+        st.Page(page_optimizacion, title="Optimización", icon="🧩", url_path="optimizacion"),
         st.Page(page_configuracion, title="Configuración", icon="⚙️", url_path="configuracion"),
     ],
 })

@@ -19,6 +19,11 @@ persistencia, y análisis avanzado (SHAP / PDF) diferido a una fase posterior.
   P80 estimado, historial de predicciones.
 - **📈 Resultados** — ranking de modelos, predicho-vs-real, residuos, importancia de
   variables (por permutación), historial de entrenamientos y predicciones, exportar.
+- **🧩 Optimización** — diseño inverso de la malla: el usuario fija el P80 requerido
+  y una metaheurística (PSO/FFA/GA) busca burden, taco y longitud de taladro usando
+  los modelos entrenados como surrogate. El FP se calcula en cada evaluación con
+  Q = ρe·(π·d²/4)·(L − T) y FP = Q/(B·S·H), calibrado con la base de la mina
+  (malla cuadrada S = B o triangular equilátera S = 1.155·B).
 - **⚙️ Configuración** — gestión de versiones (activar, eliminar, comparar) y ayuda.
 
 ## Dos tareas de predicción
@@ -56,12 +61,14 @@ frag_app/
 │   ├── preprocessing.py      # pipeline de datos de la tesis
 │   ├── models.py             # registro de los 7 modelos híbridos + entrenamiento
 │   ├── training.py           # orquestador multi-modelo + comparación
+│   ├── optimization.py       # diseño inverso de la malla (P80 objetivo -> B, T, L, FP)
 │   └── versioning.py         # versionado: guardar/activar/comparar/eliminar
 ├── views/                    # una vista por sección
 │   ├── datos.py
 │   ├── entrenamiento.py
 │   ├── prediccion.py
 │   ├── resultados.py
+│   ├── optimizacion.py
 │   └── configuracion.py
 ├── requirements.txt
 └── README.md
