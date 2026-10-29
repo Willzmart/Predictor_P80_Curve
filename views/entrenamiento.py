@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
  
 from core import (db, models as M, curve_models as CM, training,
-                  versioning as V, preprocessing as P)
+                  versioning as V, preprocessing as P, autotune as AT)
  
  
 # --------------------------------------------------------------------------- #
@@ -50,6 +50,15 @@ def _es_salida_fragmentacion(col) -> bool:
     return False
  
  
+def _nota_diagnostico():
+    st.caption(
+        "**Épocas**: las que usó cada modelo hasta que su error de validación "
+        "dejó de mejorar. **Diagnóstico**: compara R² de entrenamiento y de test; "
+        f"una brecha mayor a {AT.BRECHA_R2_ALERTA:.2f} indica que el modelo "
+        "memoriza el entrenamiento más de lo que generaliza. Ante un empate "
+        "práctico de RMSE, prefiere el modelo que generaliza bien.")
+
+
 def page_entrenamiento():
     st.title("🧠 Entrenamiento de modelos")
  
@@ -123,10 +132,11 @@ def _entrenar_p80(df, hay_curva):
              "la voladura, no parámetros de diseño) para evitar fuga de información.")
     features = [c for c in posibles if c not in excluir]
  
-    c3, c4, c5 = st.columns(3)
-    k = c3.selectbox("k (validación cruzada)", [3, 5, 10], index=1, key="k_p80")
-    epoch = c4.number_input("Épocas", 2, 100, 10, key="ep_p80")
-    pop = c5.number_input("Población", 10, 60, 15, key="pop_p80")
+    st.info("⚙️ **Configuración automática** · validación cruzada k = 5 · "
+            f"población = {AT.POP_SIZE} · épocas: cada modelo se detiene solo cuando su error "
+            "de validación deja de mejorar (parada temprana, entre "
+            f"{AT.MIN_EPOCH} y {AT.MAX_EPOCH}). La búsqueda penaliza la brecha entre validación y "
+            "entrenamiento para evitar sobreajuste.")
     st.info(f"**{target}** ← {len(features)} variables · {len(seleccion)} modelos")
  
     if st.button("🚀 Entrenar (P80)", type="primary", disabled=not seleccion):
@@ -135,7 +145,6 @@ def _entrenar_p80(df, hay_curva):
         with st.spinner("Optimizando y entrenando..."):
             bundles, tabla, mejor = training.entrenar_varios(
                 seleccion, X, y, test_size=test_size,
-                epoch=int(epoch), pop_size=int(pop), n_splits=int(k),
                 progreso=lambda f, t: barra.progress(f, text=t))
         st.session_state["_p80"] = {"bundles": bundles, "tabla": tabla,
                                     "mejor": mejor, "nobs": len(df), "target": target}
@@ -149,6 +158,7 @@ def _mostrar_resultado_p80(s):
     bundles, tabla, mejor = s["bundles"], s["tabla"], s["mejor"]
     st.subheader("Evaluación y comparación")
     st.dataframe(tabla.drop(columns=["key"]), width="stretch", hide_index=True)
+    _nota_diagnostico()
     st.success(f"🏆 Mejor: **{M.REGISTRY[mejor]['label']}** "
                f"(RMSE test {bundles[mejor]['metrics']['rmse_test']:.4f})")
     st.bar_chart(tabla.set_index("Modelo")[["R2_test"]])
@@ -195,11 +205,13 @@ def _entrenar_curva(df):
                              default=excl_def, key="excl_cur")
     features = [c for c in posibles if c not in excluir]
  
-    c1, c2, c3, c4 = st.columns(4)
-    test_size = c1.slider("Test", 0.1, 0.4, 0.2, 0.05, key="ts_cur")
-    k = c2.selectbox("k (CV)", [3, 5, 10], index=1, key="k_cur")
-    epoch = c3.number_input("Épocas", 2, 100, 20, key="ep_cur")
-    pop = c4.number_input("Población", 10, 60, 10, key="pop_cur")
+    c1, _ = st.columns(2)
+    test_size = c1.slider("Proporción de test", 0.1, 0.4, 0.2, 0.05, key="ts_cur")
+    st.info("⚙️ **Configuración automática** · validación cruzada k = 5 · "
+            f"población = {AT.POP_SIZE} · épocas: cada modelo se detiene solo cuando su error "
+            "de validación deja de mejorar (parada temprana, entre "
+            f"{AT.MIN_EPOCH} y {AT.MAX_EPOCH}). La búsqueda penaliza la brecha entre validación y "
+            "entrenamiento para evitar sobreajuste.")
     st.info(f"Curva (10 percentiles) ← {len(features)} variables · "
             f"{len(seleccion)} modelos")
  
@@ -213,7 +225,6 @@ def _entrenar_curva(df):
         with st.spinner("Optimizando y entrenando (multi-salida, más lento)..."):
             bundles, tabla, mejor = training.entrenar_varios_curva(
                 seleccion, X, y, test_size=test_size,
-                epoch=int(epoch), pop_size=int(pop), n_splits=int(k),
                 progreso=lambda f, t: barra.progress(f, text=t))
         st.session_state["_cur"] = {"bundles": bundles, "tabla": tabla,
                                     "mejor": mejor, "nobs": len(df)}
@@ -226,6 +237,7 @@ def _mostrar_resultado_curva(s):
     bundles, tabla, mejor = s["bundles"], s["tabla"], s["mejor"]
     st.subheader("Evaluación y comparación")
     st.dataframe(tabla.drop(columns=["key"]), width="stretch", hide_index=True)
+    _nota_diagnostico()
     st.success(f"🏆 Mejor: **{CM.REGISTRY[mejor]['label']}** "
                f"(RMSE promedio test {bundles[mejor]['metrics']['rmse_test']:.4f})")
  
