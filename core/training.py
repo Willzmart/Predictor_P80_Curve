@@ -9,10 +9,11 @@ from sklearn.model_selection import train_test_split
 
 from . import models as M
 from . import config
+from . import autotune as AT
 
 
 def entrenar_varios(model_keys, X, y, test_size=0.2, epoch=None, pop_size=None,
-                    n_splits=5, progreso=None):
+                    n_splits=None, progreso=None, auto=True):
     """Entrena cada modelo de la lista y devuelve (bundles, tabla_comparativa,
     mejor_key).
 
@@ -29,7 +30,7 @@ def entrenar_varios(model_keys, X, y, test_size=0.2, epoch=None, pop_size=None,
             progreso(i / total, f"Entrenando {M.REGISTRY[key]['label']}...")
         bundles[key] = M.entrenar_hibrido(
             key, Xtr, Xte, ytr, yte,
-            epoch=epoch, pop_size=pop_size, n_splits=n_splits,
+            epoch=epoch, pop_size=pop_size, n_splits=n_splits, auto=auto,
         )
     if progreso:
         progreso(1.0, "Entrenamiento completo")
@@ -48,7 +49,7 @@ def entrenar_varios(model_keys, X, y, test_size=0.2, epoch=None, pop_size=None,
 
 
 def entrenar_varios_curva(model_keys, X, y, test_size=0.2, epoch=None,
-                          pop_size=None, n_splits=5, progreso=None):
+                          pop_size=None, n_splits=None, progreso=None, auto=True):
     """Entrena varios modelos de curva (multi-salida) y devuelve
     (bundles, tabla_comparativa, mejor_key)."""
     from . import curve_models as CM
@@ -62,7 +63,7 @@ def entrenar_varios_curva(model_keys, X, y, test_size=0.2, epoch=None,
             progreso(i / total, f"Entrenando {CM.REGISTRY[key]['label']}...")
         bundles[key] = CM.entrenar_curva_hibrido(
             key, Xtr, Xte, ytr, yte,
-            epoch=epoch, pop_size=pop_size, n_splits=n_splits)
+            epoch=epoch, pop_size=pop_size, n_splits=n_splits, auto=auto)
     if progreso:
         progreso(1.0, "Entrenamiento completo")
 
@@ -86,6 +87,9 @@ def tabla_comparativa(bundles: dict) -> pd.DataFrame:
         }
         if "r2_train" in m:
             fila["R2_train"] = round(m["r2_train"], 4)
+        if "epocas" in m:
+            fila["Épocas"] = int(m["epocas"])
+        fila["Diagnóstico"] = AT.diagnostico(m.get("r2_train"), m.get("r2_test"))
         filas.append(fila)
     df = pd.DataFrame(filas)
     return df.sort_values("RMSE_test").reset_index(drop=True)

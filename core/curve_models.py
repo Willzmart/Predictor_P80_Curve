@@ -23,6 +23,7 @@ from sklearn.metrics import (
 from mealpy import FFA, PSO, GA, FloatVar, IntegerVar
 
 from . import preprocessing as P
+from . import autotune as AT
 
 
 # --------------------------------------------------------------------------- #
@@ -111,38 +112,59 @@ def corregir_monotonia(y_pred):
 #  Entrenamiento de un modelo de curva                                        #
 # --------------------------------------------------------------------------- #
 def entrenar_curva_hibrido(modelo_key, X_train, X_test, y_train, y_test,
-                           epoch=None, pop_size=None, n_splits=5):
+                           epoch=None, pop_size=None, n_splits=None, auto=True):
     """Optimiza, entrena y evalúa un modelo de curva multi-salida. Devuelve un
-    bundle listo para guardar y predecir."""
+    bundle listo para guardar y predecir.
+
+    auto=True: k = 5, población = 15 y épocas por parada temprana; objetivo =
+    RMSE de validación penalizado por la brecha con entrenamiento (autotune)."""
     cfg = REGISTRY[modelo_key]
-    epoch = max(int(epoch or cfg["epoch"]), 2)
-    pop_size = max(int(pop_size or cfg["pop_size"]), 10)
-    # BaseGA de mealpy falla con población impar -> forzar par (ver models.py)
-    if pop_size % 2:
+    if auto:
+        pop_size, n_splits, epoch = AT.POP_SIZE, AT.K_FOLDS, AT.MAX_EPOCH
+    else:
+        epoch = max(int(epoch or cfg["epoch"]), 2)
+        pop_size = pop_size or cfg["pop_size"]
+        n_splits = n_splits or 5
+    pop_size = max(int(pop_size), 10)
+    # BaseGA de mealpy falla con población impar -> forzar par (solo GA)
+    if cfg["make_optimizer"] is _opt_ga and pop_size % 2:
         pop_size += 1
     percentiles = list(y_train.columns)
 
     cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)
 
-    def fitness(solution):
+    def _rmse_prom(y_real, y_hat):
+        return float(np.mean([root_mean_squared_error(y_real.iloc[:, i], y_hat[:, i])
+                              for i in range(len(percentiles))]))
+
+    def _cv(solution):
         model = cfg["build"](solution)
-        rmse_folds = []
+        val, tr = [], []
         for tr_idx, val_idx in cv.split(X_train):
             Xtr, Xval = X_train.iloc[tr_idx], X_train.iloc[val_idx]
             ytr, yval = y_train.iloc[tr_idx], y_train.iloc[val_idx]
             model.fit(Xtr, ytr)
-            yhat = model.predict(Xval)
-            rmse_p = [root_mean_squared_error(yval.iloc[:, i], yhat[:, i])
-                      for i in range(len(percentiles))]
-            rmse_folds.append(np.mean(rmse_p))
-        return float(np.mean(rmse_folds))
+            val.append(_rmse_prom(yval, model.predict(Xval)))
+            tr.append(_rmse_prom(ytr, model.predict(Xtr)))
+        return float(np.mean(val)), float(np.mean(tr))
+
+    def fitness(solution):
+        rmse_val, rmse_tr = _cv(solution)
+        return AT.objetivo(rmse_val, rmse_tr) if auto else rmse_val
 
     problem = {"obj_func": fitness, "bounds": cfg["make_bounds"](),
                "minmax": "min", "log_to": None}
     optimizer = cfg["make_optimizer"](epoch, pop_size)
-    g_best = optimizer.solve(problem)
+    if auto:
+        # escala de la tolerancia: desviación estándar media de los percentiles
+        escala = y_train.std().mean()
+        g_best = optimizer.solve(problem, seed=42,
+                                 termination=AT.terminacion(escala=float(escala)))
+    else:
+        g_best = optimizer.solve(problem, seed=42)
     best = g_best.solution
-    best_cv_rmse = float(g_best.target.fitness)
+    best_cv_rmse, best_cv_train = _cv(best)
+    epocas = AT.epocas_usadas(optimizer)
 
     # Compilar y entrenar el mejor modelo
     model = cfg["build"](best)
@@ -159,6 +181,10 @@ def entrenar_curva_hibrido(modelo_key, X_train, X_test, y_train, y_test,
             "mae_test": round(mean_absolute_error(y_test.iloc[:, i], y_pred_test[:, i]), 4),
             "r2_test": round(r2_score(y_test.iloc[:, i], y_pred_test[:, i]), 4),
         })
+    r2_train = float(np.mean([r2_score(y_train.iloc[:, i], y_pred_train[:, i])
+                              for i in range(len(percentiles))]))
+    rmse_train = float(np.mean([root_mean_squared_error(y_train.iloc[:, i], y_pred_train[:, i])
+                                for i in range(len(percentiles))]))
     rmse_prom = float(np.mean([d["rmse_test"] for d in por_percentil]))
     mae_prom = float(np.mean([d["mae_test"] for d in por_percentil]))
     r2_prom = float(np.mean([d["r2_test"] for d in por_percentil]))
@@ -185,7 +211,11 @@ def entrenar_curva_hibrido(modelo_key, X_train, X_test, y_train, y_test,
         "metrics": {"rmse_test": round(rmse_prom, 4),
                     "mae_test": round(mae_prom, 4),
                     "r2_test": round(r2_prom, 4),
-                    "rmse_cv": round(best_cv_rmse, 4)},
+                    "rmse_cv": round(best_cv_rmse, 4),
+                    "rmse_cv_train": round(best_cv_train, 4),
+                    "rmse_train": round(rmse_train, 4),
+                    "r2_train": round(r2_train, 4),
+                    "epocas": epocas, "pop_size": pop_size, "k_folds": n_splits},
         "por_percentil": por_percentil,
         "convergence": convergence,
         # muestra para graficar en resultados

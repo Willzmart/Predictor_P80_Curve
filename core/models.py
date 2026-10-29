@@ -23,7 +23,8 @@ import numpy as np
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
-from sklearn.model_selection import KFold, cross_val_score
+from sklearn.model_selection import KFold, cross_validate
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     root_mean_squared_error,
@@ -31,6 +32,8 @@ from sklearn.metrics import (
     r2_score,
 )
 from mealpy import FFA, PSO, GA, FloatVar, IntegerVar
+
+from . import autotune as AT
 
 
 # --------------------------------------------------------------------------- #
@@ -192,44 +195,62 @@ def listar_modelos():
 def entrenar_hibrido(
     modelo_key,
     X_train, X_test, y_train, y_test,
-    epoch=None, pop_size=None, n_splits=5,
-    log=None,
+    epoch=None, pop_size=None, n_splits=None,
+    log=None, auto=True,
 ):
     """Optimiza hiperparámetros con la metaheurística, compila el mejor modelo
     y lo evalúa. Devuelve un dict "bundle" con todo lo necesario para predecir.
 
+    auto=True (por defecto): k = 5 y población = 15 fijos, y las épocas las
+    decide la parada temprana (ver core/autotune.py). La función objetivo es el
+    RMSE de validación cruzada penalizado por la brecha validación–entrenamiento
+    para evitar sobreajuste.
+    auto=False: comportamiento clásico con epoch/pop_size/n_splits manuales.
+
     log: callable opcional para reportar progreso a la UI (recibe un str).
     """
     cfg = REGISTRY[modelo_key]
-    epoch = epoch or cfg["epoch"]
-    pop_size = pop_size or cfg["pop_size"]
+    if auto:
+        pop_size, n_splits, epoch = AT.POP_SIZE, AT.K_FOLDS, AT.MAX_EPOCH
+    else:
+        epoch = max(int(epoch or cfg["epoch"]), 2)
+        pop_size = pop_size or cfg["pop_size"]
+        n_splits = n_splits or 5
     # Piso de seguridad: mealpy (sobre todo GA) falla con poblaciones diminutas.
     pop_size = max(int(pop_size), 10)
     # BaseGA de mealpy tiene un bug con población IMPAR (el cruce genera hijos de
-    # a pares y el conteo no cuadra -> IndexError). Forzamos población par.
-    if pop_size % 2:
+    # a pares y el conteo no cuadra -> IndexError). Solo para GA: población par.
+    if cfg["make_optimizer"] is _opt_ga and pop_size % 2:
         pop_size += 1
-    epoch = max(int(epoch), 2)
     needs_scaling = cfg["needs_scaling"]
 
     def _say(msg):
         if log:
             log(msg)
 
-    # Escalado (siempre ajustamos el scaler; se aplica según el modelo)
+    # Escalado del modelo final (se ajusta con todo el train)
     scaler = StandardScaler().fit(X_train)
     Xtr = scaler.transform(X_train) if needs_scaling else X_train.values
     Xte = scaler.transform(X_test) if needs_scaling else X_test.values
 
     cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)
 
-    # Función objetivo: RMSE promedio en validación cruzada
-    def fitness(solution):
+    def _cv(solution):
+        """RMSE de validación y de entrenamiento (promedio de los k folds).
+        Para SVR el escalado va DENTRO de cada fold (Pipeline), así el fold de
+        validación no influye en el escalado: evita fuga de información."""
         model = cfg["build"](solution)
-        scores = cross_val_score(
-            model, Xtr, y_train, cv=cv, scoring="neg_mean_squared_error"
-        )
-        return float(np.sqrt(-scores.mean()))
+        if needs_scaling:
+            model = make_pipeline(StandardScaler(), model)
+        r = cross_validate(model, X_train.values, y_train, cv=cv,
+                           scoring="neg_mean_squared_error",
+                           return_train_score=True)
+        return (float(np.sqrt(-r["test_score"].mean())),
+                float(np.sqrt(-r["train_score"].mean())))
+
+    def fitness(solution):
+        rmse_val, rmse_tr = _cv(solution)
+        return AT.objetivo(rmse_val, rmse_tr) if auto else rmse_val
 
     problem = {
         "obj_func": fitness,
@@ -238,12 +259,19 @@ def entrenar_hibrido(
         "log_to": None,   # silencia el logger de mealpy
     }
 
-    _say(f"Optimizando {cfg['label']}  (epoch={epoch}, pop_size={pop_size})...")
     optimizer = cfg["make_optimizer"](epoch, pop_size)
-    g_best = optimizer.solve(problem)
+    if auto:
+        _say(f"Optimizando {cfg['label']} (k={n_splits}, población={pop_size}, "
+             f"épocas automáticas hasta {epoch})...")
+        g_best = optimizer.solve(problem, termination=AT.terminacion(y_train),
+                                 seed=42)
+    else:
+        _say(f"Optimizando {cfg['label']}  (epoch={epoch}, pop_size={pop_size})...")
+        g_best = optimizer.solve(problem, seed=42)
     best_solution = g_best.solution
-    best_cv_rmse = float(g_best.target.fitness)
-    _say(f"Optimización terminada. RMSE (CV) = {best_cv_rmse:.4f}")
+    best_cv_rmse, best_cv_train = _cv(best_solution)
+    epocas = AT.epocas_usadas(optimizer)
+    _say(f"Optimización terminada en {epocas} épocas. RMSE (CV) = {best_cv_rmse:.4f}")
 
     # Compilar el mejor modelo y entrenarlo con todo el train
     best_model = cfg["build"](best_solution)
@@ -260,6 +288,10 @@ def entrenar_hibrido(
         "r2_train": r2_score(y_train, y_pred_train),
         "r2_test": r2_score(y_test, y_pred_test),
         "rmse_cv": best_cv_rmse,
+        "rmse_cv_train": best_cv_train,
+        "epocas": epocas,
+        "pop_size": pop_size,
+        "k_folds": n_splits,
     }
 
     # Historial de convergencia (para graficar)
